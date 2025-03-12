@@ -1,0 +1,4 @@
+discord.py[voice]>=2.5.0
+yt-dlp
+python-dotenv
+PyNaCl>=1.5.0

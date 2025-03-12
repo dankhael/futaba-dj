@@ -1,0 +1,57 @@
+# --- Secrets / runtime config -----------------------------------------------
+.env
+.env.*
+!.env.example
+cookies.txt
+
+# --- Python bytecode & build artifacts --------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+*.egg
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Virtual environments ---------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+
+# --- Tooling caches ---------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- yt-dlp / FFmpeg byproducts ---------------------------------------------
+# Bot streams (download=False), but yt-dlp leaves these if anyone toggles it.
+*.part
+*.ytdl
+*.webm
+*.m4a
+*.opus
+*.mp4
+*.mkv
+*.mp3
+!sample.mp3
+
+# --- Logs -------------------------------------------------------------------
+*.log
+logs/
+
+# --- IDE / OS ---------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

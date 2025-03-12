@@ -1,0 +1,45 @@
+# Tooling config only — packaging is intentionally not declared because the
+# bot is shipped via Dockerfile / `python bot.py`, not as an installable package.
+
+[tool.black]
+target-version = ["py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.venv
+  | venv
+  | build
+  | dist
+)/
+'''
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["venv", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Curated set: pycodestyle + pyflakes basics, import order, common bugs,
+# pyupgrade rewrites, simplifications, ruff-specific lints.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+# B008 (mutable default args via call) trips on discord.py decorators that use
+# Cog/Context defaults; revisit if it actually flags a real bug.
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use fake classes that intentionally shadow names and ignore unused args.
+"tests/*" = ["B011"]
+
+[tool.pytest.ini_options]
+# pytest needs to import `services.*` from the repo root.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
