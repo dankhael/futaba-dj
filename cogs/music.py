@@ -72,17 +72,28 @@ class Music(commands.Cog):
             self._advance_after_finish(voice_client, queue), self.bot.loop
         )
 
-    async def _advance_after_finish(
+    async def _start_next_playable(
         self, voice_client: discord.VoiceClient, queue: GuildQueue
-    ) -> None:
-        # Loop (not recurse) so a string of broken tracks can't blow the stack.
+    ) -> TrackInfo | None:
+        """Start the next track, skipping any that fail to load.
+
+        Returns the track that actually started, or ``None`` when the
+        queue is exhausted. Loops (not recurses) so a streak of broken
+        tracks — common with playlists containing private/deleted videos —
+        can't blow the stack.
+        """
         while voice_client.is_connected():
             try:
-                await self._start_next(voice_client, queue)
+                return await self._start_next(voice_client, queue)
             except Exception as exc:
                 _LOG_PLAYBACK.error("failed to start next track: %s", exc)
                 continue
-            return
+        return None
+
+    async def _advance_after_finish(
+        self, voice_client: discord.VoiceClient, queue: GuildQueue
+    ) -> None:
+        await self._start_next_playable(voice_client, queue)
 
     # -- commands ---------------------------------------------------------
 
@@ -96,13 +107,16 @@ class Music(commands.Cog):
     async def play(self, ctx: commands.Context, *, url: str) -> None:
         """Enqueues a URL/search; starts playback if the bot is idle.
 
+        Playlist URLs (``list=...`` or ``/playlist?...``) enqueue every
+        video in the playlist.
+
         Example: ``!play https://youtu.be/dQw4w9WgXcQ``
         """
         if not await self._ensure_voice(ctx):
             return
         async with ctx.typing():
             try:
-                info = await self._source.probe(
+                infos = await self._source.probe_many(
                     url, loop=self.bot.loop, requested_by=str(ctx.author)
                 )
             except Exception as exc:
@@ -110,14 +124,30 @@ class Music(commands.Cog):
                 return
             queue = self._queue_for(ctx)
             voice = ctx.voice_client
-            if voice.is_playing() or voice.is_paused():
-                position = queue.enqueue(info)
-                await ctx.send(f"Queued **{info.title}** (position #{position})")
+            was_idle = not (voice.is_playing() or voice.is_paused())
+            first_position = len(queue.pending) + 1
+            for info in infos:
+                queue.enqueue(info)
+            if was_idle:
+                track = await self._start_next_playable(voice, queue)
+                if track is None:
+                    await ctx.send(
+                        "Could not start any track — every entry was unavailable."
+                    )
+                    return
+                extra = len(infos) - 1
+                suffix = f" (+{extra} more queued)" if extra > 0 else ""
+                await ctx.send(f"Now playing: **{track.title}**{suffix}")
                 return
-            queue.enqueue(info)
-            track = await self._start_next(voice, queue)
-            if track is not None:
-                await ctx.send(f"Now playing: **{track.title}**")
+            if len(infos) == 1:
+                await ctx.send(
+                    f"Queued **{infos[0].title}** (position #{first_position})"
+                )
+                return
+            await ctx.send(
+                f"Queued {len(infos)} tracks from playlist "
+                f"(starting at position #{first_position})."
+            )
 
     @commands.command(name="playnext")
     async def playnext(self, ctx: commands.Context, *, url: str) -> None:
@@ -136,7 +166,7 @@ class Music(commands.Cog):
             queue.enqueue_front(info)
             voice = ctx.voice_client
             if not voice.is_playing() and not voice.is_paused():
-                track = await self._start_next(voice, queue)
+                track = await self._start_next_playable(voice, queue)
                 if track is not None:
                     await ctx.send(f"Now playing: **{track.title}**")
                     return

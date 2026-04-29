@@ -138,6 +138,134 @@ def test_probe_propagates_yt_dlp_exceptions(loop) -> None:
         _await(loop, TrackSource(fake).probe("q", loop=loop))  # type: ignore[arg-type]
 
 
+# -- probe_many: playlist enumeration ---------------------------------------
+
+
+def test_probe_many_single_url_returns_one_track(loop) -> None:
+    fake = FakeYoutubeDL({"title": "Solo", "url": "stream://s", "duration": 100})
+    src = TrackSource(fake)  # type: ignore[arg-type]
+
+    infos = _await(loop, src.probe_many("https://youtu.be/abc", loop=loop))
+
+    assert len(infos) == 1
+    assert infos[0].title == "Solo"
+    # Single-track path goes through the regular extractor, not the playlist one.
+    assert fake.calls == [("https://youtu.be/abc", False)]
+
+
+def test_probe_many_search_query_uses_single_track_path(loop) -> None:
+    fake = FakeYoutubeDL({"title": "found", "url": "u"})
+    src = TrackSource(fake)  # type: ignore[arg-type]
+
+    infos = _await(loop, src.probe_many("never gonna give you up", loop=loop))
+
+    assert len(infos) == 1
+    assert infos[0].title == "found"
+
+
+def test_probe_many_playlist_url_enumerates_all_entries(loop) -> None:
+    track_fake = FakeYoutubeDL({"title": "single", "url": "u"})
+    playlist_fake = FakeYoutubeDL(
+        {
+            "entries": [
+                {
+                    "title": "T1",
+                    "url": "https://youtu.be/v1",
+                    "webpage_url": "https://youtu.be/v1",
+                    "duration": 60,
+                },
+                {
+                    "title": "T2",
+                    "url": "https://youtu.be/v2",
+                    "webpage_url": "https://youtu.be/v2",
+                    "duration": 90,
+                },
+                {
+                    "title": "T3",
+                    "url": "https://youtu.be/v3",
+                    "webpage_url": "https://youtu.be/v3",
+                    "duration": 120,
+                },
+            ],
+        }
+    )
+    src = TrackSource(track_fake, playlist_fake)  # type: ignore[arg-type]
+
+    infos = _await(
+        loop,
+        src.probe_many(
+            "https://youtube.com/playlist?list=PLxyz",
+            loop=loop,
+            requested_by="bob",
+        ),
+    )
+
+    assert [i.title for i in infos] == ["T1", "T2", "T3"]
+    assert [i.duration_seconds for i in infos] == [60, 90, 120]
+    assert all(i.requested_by == "bob" for i in infos)
+    # Each entry's query is its own video URL so build_audio later resolves
+    # the right stream — not the playlist URL.
+    assert [i.query for i in infos] == [
+        "https://youtu.be/v1",
+        "https://youtu.be/v2",
+        "https://youtu.be/v3",
+    ]
+    # Single-track extractor must not have been touched for a playlist URL.
+    assert track_fake.calls == []
+
+
+def test_probe_many_skips_unresolved_playlist_entries(loop) -> None:
+    """Private/deleted videos surface as ``None`` entries with extract_flat;
+    those should be silently skipped, not abort the whole playlist.
+    """
+    playlist_fake = FakeYoutubeDL(
+        {
+            "entries": [
+                None,
+                {"title": "ok", "url": "https://youtu.be/ok"},
+                {"title": "no-url"},  # missing both url + webpage_url
+            ],
+        }
+    )
+    src = TrackSource(FakeYoutubeDL({}), playlist_fake)  # type: ignore[arg-type]
+
+    infos = _await(
+        loop, src.probe_many("https://www.youtube.com/playlist?list=X", loop=loop)
+    )
+
+    assert [i.title for i in infos] == ["ok"]
+
+
+def test_probe_many_raises_when_playlist_has_no_playable_entries(loop) -> None:
+    playlist_fake = FakeYoutubeDL({"entries": [None, {"title": "no-url"}]})
+    src = TrackSource(FakeYoutubeDL({}), playlist_fake)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="none yielded a playable URL"):
+        _await(loop, src.probe_many("https://youtube.com/playlist?list=X", loop=loop))
+
+
+def test_probe_many_raises_on_empty_playlist(loop) -> None:
+    playlist_fake = FakeYoutubeDL({"entries": []})
+    src = TrackSource(FakeYoutubeDL({}), playlist_fake)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="contained no entries"):
+        _await(loop, src.probe_many("https://youtube.com/playlist?list=X", loop=loop))
+
+
+def test_probe_many_detects_list_param_on_watch_url(loop) -> None:
+    """``youtu.be/ID?list=...`` should route through the playlist extractor."""
+    track_fake = FakeYoutubeDL({"title": "would-be-single", "url": "u"})
+    playlist_fake = FakeYoutubeDL(
+        {"entries": [{"title": "from-list", "url": "https://youtu.be/x"}]}
+    )
+    src = TrackSource(track_fake, playlist_fake)  # type: ignore[arg-type]
+
+    infos = _await(loop, src.probe_many("https://youtu.be/abc?list=PLxyz", loop=loop))
+
+    assert [i.title for i in infos] == ["from-list"]
+    assert track_fake.calls == []
+
+
 # -- threading invariant -----------------------------------------------------
 
 
