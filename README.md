@@ -54,7 +54,7 @@ The image is based on `python:3.12-slim` and installs FFmpeg via apt.
 YouTube answers datacenter IPs with `Sign in to confirm you're not a bot`
 for every yt-dlp player client. The workaround is a logged-in session
 exported as a Netscape `cookies.txt` next to `docker-compose.yml`
-(mounted read-only at `/app/cookies.txt`; override with `YTDL_COOKIES_FILE`).
+(mounted at `/app/cookies.txt`; override with `YTDL_COOKIES_FILE`).
 
 1. Use a **throwaway Google account** — YouTube may flag the account.
 2. In an **incognito window**, log in to youtube.com, then export cookies

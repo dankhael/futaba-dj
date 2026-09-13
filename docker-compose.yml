@@ -13,7 +13,8 @@ services:
     volumes:
       # YouTube blocks datacenter IPs without a logged-in session; export a
       # Netscape cookies.txt (see README) and drop it next to this file.
-      - ./cookies.txt:/app/cookies.txt:ro
+      # Mounted read-write: yt-dlp rewrites it to persist rotated cookies.
+      - ./cookies.txt:/app/cookies.txt
     # yt-dlp keeps changing to keep up with YouTube; rebuild (`docker compose
     # up -d --build`) whenever playback starts failing before debugging code.
     logging:
