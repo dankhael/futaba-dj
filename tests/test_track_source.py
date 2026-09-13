@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from services.track_source import TrackInfo, TrackSource
+from services.track_source import TrackInfo, TrackSource, cookie_ytdl_opts
 
 
 class FakeYoutubeDL:
@@ -281,3 +281,31 @@ def test_probe_runs_extract_info_off_the_event_loop_thread(loop) -> None:
 
     assert capture.thread is not None
     assert capture.thread is not main_thread
+
+
+# --- cookie_ytdl_opts --------------------------------------------------------
+
+
+def test_cookie_opts_empty_when_file_missing(tmp_path) -> None:
+    assert cookie_ytdl_opts(str(tmp_path / "nope.txt")) == {}
+
+
+def test_cookie_opts_empty_when_file_is_blank(tmp_path) -> None:
+    # The repo ships an empty cookies.txt placeholder; yt-dlp would choke
+    # on a zero-byte Netscape file, so treat it as "no cookies".
+    blank = tmp_path / "cookies.txt"
+    blank.write_text("")
+    assert cookie_ytdl_opts(str(blank)) == {}
+
+
+def test_cookie_opts_points_at_non_empty_file(tmp_path) -> None:
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    assert cookie_ytdl_opts(str(cookies)) == {"cookiefile": str(cookies)}
+
+
+def test_cookie_opts_reads_path_from_env(tmp_path, monkeypatch) -> None:
+    cookies = tmp_path / "from-env.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    monkeypatch.setenv("YTDL_COOKIES_FILE", str(cookies))
+    assert cookie_ytdl_opts() == {"cookiefile": str(cookies)}

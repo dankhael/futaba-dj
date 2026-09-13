@@ -8,7 +8,9 @@ extractor would only touch this module.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import discord
@@ -55,6 +57,28 @@ _PLAYLIST_YTDL_OPTS: dict[str, Any] = {
 }
 
 
+# YouTube answers datacenter IPs (e.g. the VPS) with "Sign in to confirm
+# you're not a bot" for every player_client; the only reliable workaround
+# is a Netscape cookies.txt from a logged-in account. Optional so local
+# runs on residential IPs keep working without one.
+_COOKIES_FILE_ENV = "YTDL_COOKIES_FILE"
+_DEFAULT_COOKIES_FILE = "cookies.txt"
+
+
+def cookie_ytdl_opts(path: str | None = None) -> dict[str, str]:
+    """Return ``{"cookiefile": path}`` when a non-empty cookies file exists.
+
+    Example::
+
+        opts = {**_YTDL_OPTS, **cookie_ytdl_opts()}
+    """
+    resolved = path or os.environ.get(_COOKIES_FILE_ENV, _DEFAULT_COOKIES_FILE)
+    cookie_path = Path(resolved)
+    if not cookie_path.is_file() or cookie_path.stat().st_size == 0:
+        return {}
+    return {"cookiefile": str(cookie_path)}
+
+
 # These reconnect flags exist because yt-dlp's resolved URLs frequently
 # drop mid-stream — keep them when editing the FFmpeg invocation.
 _FFMPEG_OPTS: dict[str, str] = {
@@ -90,9 +114,10 @@ class TrackSource:
 
     @classmethod
     def with_defaults(cls) -> TrackSource:
+        cookies = cookie_ytdl_opts()
         return cls(
-            yt_dlp.YoutubeDL(_YTDL_OPTS),
-            yt_dlp.YoutubeDL(_PLAYLIST_YTDL_OPTS),
+            yt_dlp.YoutubeDL({**_YTDL_OPTS, **cookies}),
+            yt_dlp.YoutubeDL({**_PLAYLIST_YTDL_OPTS, **cookies}),
         )
 
     async def probe(

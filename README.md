@@ -42,11 +42,29 @@ A `.env` file at the repo root with `DISCORD_TOKEN=...` is also picked up automa
 ## Running with Docker
 
 ```bash
-docker build -t futaba_dj .
-docker run -e DISCORD_TOKEN=your-token-here futaba_dj
+cp .env.example .env   # set DISCORD_TOKEN
+docker compose up -d --build
+docker compose logs -f
 ```
 
-The image is based on `python:3.9-slim` and installs FFmpeg via apt.
+The image is based on `python:3.12-slim` and installs FFmpeg via apt.
+
+### YouTube cookies (required on VPS / datacenter IPs)
+
+YouTube answers datacenter IPs with `Sign in to confirm you're not a bot`
+for every yt-dlp player client. The workaround is a logged-in session
+exported as a Netscape `cookies.txt` next to `docker-compose.yml`
+(mounted read-only at `/app/cookies.txt`; override with `YTDL_COOKIES_FILE`).
+
+1. Use a **throwaway Google account** — YouTube may flag the account.
+2. In an **incognito window**, log in to youtube.com, then export cookies
+   with the "Get cookies.txt LOCALLY" extension (Chrome/Firefox).
+3. Close the incognito window *without* logging out (logging out
+   invalidates the exported session).
+4. `scp cookies.txt vps:/root/futaba_dj/cookies.txt && docker compose restart`.
+
+An empty or missing `cookies.txt` is ignored, so local runs on a
+residential IP keep working without one.
 
 ## Development
 
