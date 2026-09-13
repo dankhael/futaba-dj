@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    container_name: futaba_dj
+    restart: unless-stopped
+    env_file:
+      - .env
+    # yt-dlp keeps changing to keep up with YouTube; rebuild (`docker compose
+    # up -d --build`) whenever playback starts failing before debugging code.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
