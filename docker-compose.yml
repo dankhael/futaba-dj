@@ -3,6 +3,10 @@ services:
     build: .
     container_name: futaba_dj
     restart: unless-stopped
+    environment:
+      # print() is block-buffered without a TTY; without this `docker logs`
+      # never shows the "Logged in as" line.
+      PYTHONUNBUFFERED: "1"
     env_file:
       - .env
     # yt-dlp keeps changing to keep up with YouTube; rebuild (`docker compose
