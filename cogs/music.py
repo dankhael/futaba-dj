@@ -24,6 +24,9 @@ class Music(commands.Cog):
         self.bot = bot
         self._source = source
         self._queues = queues
+        # Text channel of the last music command per guild, so auto-advance
+        # (which has no ctx) can still report tracks it had to skip.
+        self._announce_channels: dict[int, discord.abc.Messageable] = {}
 
     # -- helpers ----------------------------------------------------------
 
@@ -39,7 +42,16 @@ class Music(commands.Cog):
     def _queue_for(self, ctx: commands.Context) -> GuildQueue:
         if ctx.guild is None:
             raise commands.CommandError("Music commands require a server context.")
+        self._announce_channels[ctx.guild.id] = ctx.channel
         return self._queues.for_guild(ctx.guild.id)
+
+    async def _announce_skip(
+        self, guild_id: int, track: TrackInfo | None, exc: Exception
+    ) -> None:
+        channel = self._announce_channels.get(guild_id)
+        if channel is None or track is None:
+            return
+        await channel.send(f"Skipped **{track.title}** — could not stream it: {exc}")
 
     async def _start_next(
         self, voice_client: discord.VoiceClient, queue: GuildQueue
@@ -87,6 +99,8 @@ class Music(commands.Cog):
                 return await self._start_next(voice_client, queue)
             except Exception as exc:
                 _LOG_PLAYBACK.error("failed to start next track: %s", exc)
+                await self._announce_skip(voice_client.guild.id, queue.current, exc)
+                _break_track_loop_on_failure(queue)
                 continue
         return None
 
@@ -313,6 +327,14 @@ def _resolve_loop_mode(current: LoopMode, requested: str) -> LoopMode:
         raise ValueError(
             f"unknown loop mode {requested!r}; expected off/track/queue/toggle"
         ) from exc
+
+
+def _break_track_loop_on_failure(queue: GuildQueue) -> None:
+    # ``advance()`` under LoopMode.TRACK hands back the same track forever;
+    # if that track can't stream, retrying it would never end. Drop to OFF
+    # so the queue moves on instead of spinning.
+    if queue.loop_mode is LoopMode.TRACK:
+        queue.loop_mode = LoopMode.OFF
 
 
 async def setup(bot: commands.Bot) -> None:

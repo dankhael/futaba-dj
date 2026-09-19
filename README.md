@@ -66,6 +66,34 @@ exported as a Netscape `cookies.txt` next to `docker-compose.yml`
 An empty or missing `cookies.txt` is ignored, so local runs on a
 residential IP keep working without one.
 
+### PO Token provider (fixes silent 403 skips)
+
+Even with cookies, the stream URLs YouTube hands out on a datacenter IP
+require a **GVS PO Token**; without one the CDN refuses roughly half of
+them with `HTTP 403` — the bot says "Now playing" but FFmpeg dies before
+the first frame. `docker-compose.yml` therefore runs a
+[`bgutil-ytdlp-pot-provider`](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+sidecar and points yt-dlp at it via `YTDL_POT_PROVIDER_URL`. Nothing to
+configure; just `docker compose up -d --build`.
+
+Keep the image tag in `docker-compose.yml` and the plugin version in
+`requirements.txt` identical — mismatched versions fail silently.
+
+As a second line of defence the bot pre-flights every resolved URL with
+a 1-byte ranged GET and re-extracts on 403 (up to 4 times); tracks it
+still cannot stream are reported in the text channel instead of being
+skipped silently.
+
+To check the provider is wired up:
+
+```bash
+docker compose exec bot yt-dlp -v --cookies /app/cookies.txt \
+  --extractor-args "youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416" \
+  -g https://www.youtube.com/watch?v=dQw4w9WgXcQ 2>&1 | grep "\[pot"
+# expect: PO Token Providers: bgutil:http-2.0.0 (external) ... and no
+# "GVS PO Token which was not provided" warning
+```
+
 ## Development
 
 Install runtime + dev dependencies (pytest, black, ruff):

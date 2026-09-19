@@ -8,8 +8,13 @@ services:
       # never shows the "Logged in as" line.
       PYTHONUNBUFFERED: "1"
       YTDL_COOKIES_FILE: /app/cookies.txt
+      # Without a PO Token the googlevideo CDN refuses ~50% of stream URLs
+      # with HTTP 403 (silent skips). Unset to run without the provider.
+      YTDL_POT_PROVIDER_URL: http://bgutil-provider:4416
     env_file:
       - .env
+    depends_on:
+      - bgutil-provider
     volumes:
       # YouTube blocks datacenter IPs without a logged-in session; export a
       # Netscape cookies.txt (see README) and drop it next to this file.
@@ -17,6 +22,20 @@ services:
       - ./cookies.txt:/app/cookies.txt
     # yt-dlp keeps changing to keep up with YouTube; rebuild (`docker compose
     # up -d --build`) whenever playback starts failing before debugging code.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Generates YouTube GVS PO Tokens for yt-dlp (wiki/PO-Token-Guide). Pin the
+  # tag to the bgutil-ytdlp-pot-provider version in requirements.txt — the
+  # plugin and server must match.
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.0
+    container_name: futaba_bgutil
+    restart: unless-stopped
+    init: true
     logging:
       driver: json-file
       options:

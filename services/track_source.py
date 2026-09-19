@@ -8,6 +8,7 @@ extractor would only touch this module.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,14 @@ from typing import Any
 
 import discord
 import yt_dlp
+
+from services.stream_preflight import (
+    StreamStatusProbe,
+    is_stream_rejected,
+    urllib_stream_status,
+)
+
+_LOG_EXTRACT = logging.getLogger("futaba.track_source")
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,28 @@ class TrackInfo:
 
 # yt-dlp prints noisy bug-report banners on extraction errors; silence them.
 yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ""
+
+
+class StreamRejectedError(RuntimeError):
+    """Every resolved URL for a query was refused by the CDN (HTTP 403).
+
+    Raised by ``TrackSource.resolve_stream_url`` after exhausting its
+    re-extraction budget; callers treat it like any other unplayable track.
+    """
+
+    def __init__(self, query: str, attempts: int) -> None:
+        super().__init__(
+            f"stream for {query!r} was rejected with HTTP 403 on all "
+            f"{attempts} attempts; expected a URL the CDN serves at least once"
+        )
+        self.query = query
+        self.attempts = attempts
+
+
+# Measured on the VPS: ~50% of web_embedded URLs are refused, independently
+# per extraction, so 4 draws leave ~6% of tracks unplayable without a PO
+# Token provider (see docker-compose.yml / README).
+_MAX_STREAM_ATTEMPTS = 4
 
 
 _YTDL_OPTS: dict[str, Any] = {
@@ -64,6 +95,13 @@ _PLAYLIST_YTDL_OPTS: dict[str, Any] = {
 _COOKIES_FILE_ENV = "YTDL_COOKIES_FILE"
 _DEFAULT_COOKIES_FILE = "cookies.txt"
 
+# Even with cookies, web_embedded stream URLs need a GVS PO Token or the CDN
+# refuses ~half of them with 403. The bgutil-ytdlp-pot-provider plugin
+# (requirements.txt) fetches tokens from its companion server, whose URL
+# comes from this env var (docker-compose.yml). Optional: local runs on a
+# residential IP work without it.
+_POT_PROVIDER_URL_ENV = "YTDL_POT_PROVIDER_URL"
+
 
 def cookie_ytdl_opts(path: str | None = None) -> dict[str, str]:
     """Return ``{"cookiefile": path}`` when a non-empty cookies file exists.
@@ -77,6 +115,23 @@ def cookie_ytdl_opts(path: str | None = None) -> dict[str, str]:
     if not cookie_path.is_file() or cookie_path.stat().st_size == 0:
         return {}
     return {"cookiefile": str(cookie_path)}
+
+
+def pot_provider_ytdl_opts(url: str | None = None) -> dict[str, Any]:
+    """Return yt-dlp ``extractor_args`` pointing the bgutil plugin at ``url``.
+
+    Empty when no provider URL is configured, so the plugin (if installed)
+    falls back to its own default and plain installs are unaffected.
+
+    Example::
+
+        opts = {**_YTDL_OPTS, **pot_provider_ytdl_opts("http://bgutil:4416")}
+    """
+    resolved = url or os.environ.get(_POT_PROVIDER_URL_ENV, "")
+    if not resolved:
+        return {}
+    # yt-dlp's Python API takes extractor-arg values as lists of strings.
+    return {"extractor_args": {"youtubepot-bgutilhttp": {"base_url": [resolved]}}}
 
 
 # These reconnect flags exist because yt-dlp's resolved URLs frequently
@@ -106,18 +161,20 @@ class TrackSource:
         self,
         ytdl: yt_dlp.YoutubeDL,
         playlist_ytdl: yt_dlp.YoutubeDL | None = None,
+        stream_status: StreamStatusProbe = urllib_stream_status,
     ) -> None:
         self._ytdl = ytdl
         # Fall back to the single-track extractor when no playlist
         # variant is supplied — keeps existing tests/callers working.
         self._playlist_ytdl = playlist_ytdl if playlist_ytdl is not None else ytdl
+        self._stream_status = stream_status
 
     @classmethod
     def with_defaults(cls) -> TrackSource:
-        cookies = cookie_ytdl_opts()
+        extra = {**cookie_ytdl_opts(), **pot_provider_ytdl_opts()}
         return cls(
-            yt_dlp.YoutubeDL({**_YTDL_OPTS, **cookies}),
-            yt_dlp.YoutubeDL({**_PLAYLIST_YTDL_OPTS, **cookies}),
+            yt_dlp.YoutubeDL({**_YTDL_OPTS, **extra}),
+            yt_dlp.YoutubeDL({**_PLAYLIST_YTDL_OPTS, **extra}),
         )
 
     async def probe(
@@ -177,6 +234,36 @@ class TrackSource:
             )
         return infos
 
+    async def resolve_stream_url(
+        self, query: str, *, loop: asyncio.AbstractEventLoop
+    ) -> str:
+        """Resolve a direct stream URL the CDN is confirmed to serve.
+
+        Each attempt re-extracts (a fresh URL gets a fresh verdict) and
+        pre-flights it; see ``services.stream_preflight`` for why.
+
+        Example::
+
+            url = await source.resolve_stream_url("https://youtu.be/x", loop=loop)
+        """
+        for attempt in range(1, _MAX_STREAM_ATTEMPTS + 1):
+            data = await self._extract(query, loop=loop)
+            stream_url = _stream_url_from(data, query)
+            headers: dict[str, str] = data.get("http_headers") or {}
+            status = await loop.run_in_executor(
+                None, self._stream_status, stream_url, headers
+            )
+            if not is_stream_rejected(status):
+                return stream_url
+            _LOG_EXTRACT.warning(
+                "stream rejected query=%r status=%s attempt=%s/%s",
+                query,
+                status,
+                attempt,
+                _MAX_STREAM_ATTEMPTS,
+            )
+        raise StreamRejectedError(query, _MAX_STREAM_ATTEMPTS)
+
     async def build_audio(
         self,
         query: str,
@@ -184,13 +271,7 @@ class TrackSource:
         loop: asyncio.AbstractEventLoop,
         volume: float,
     ) -> discord.PCMVolumeTransformer:
-        data = await self._extract(query, loop=loop)
-        stream_url = data.get("url")
-        if not stream_url:
-            raise RuntimeError(
-                f"yt-dlp returned no streamable URL for {query!r}; "
-                f"expected dict with non-empty 'url' key, got keys={list(data)}"
-            )
+        stream_url = await self.resolve_stream_url(query, loop=loop)
         ffmpeg_audio = discord.FFmpegPCMAudio(stream_url, **_FFMPEG_OPTS)
         return discord.PCMVolumeTransformer(ffmpeg_audio, volume=volume)
 
@@ -214,6 +295,16 @@ class TrackSource:
                 )
             data = entries[0]
         return data
+
+
+def _stream_url_from(data: dict[str, Any], query: str) -> str:
+    stream_url = data.get("url")
+    if not stream_url:
+        raise RuntimeError(
+            f"yt-dlp returned no streamable URL for {query!r}; "
+            f"expected dict with non-empty 'url' key, got keys={list(data)}"
+        )
+    return str(stream_url)
 
 
 def _is_playlist_query(query: str) -> bool:

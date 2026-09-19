@@ -13,7 +13,13 @@ from typing import Any
 
 import pytest
 
-from services.track_source import TrackInfo, TrackSource, cookie_ytdl_opts
+from services.track_source import (
+    StreamRejectedError,
+    TrackInfo,
+    TrackSource,
+    cookie_ytdl_opts,
+    pot_provider_ytdl_opts,
+)
 
 
 class FakeYoutubeDL:
@@ -309,3 +315,130 @@ def test_cookie_opts_reads_path_from_env(tmp_path, monkeypatch) -> None:
     cookies.write_text("# Netscape HTTP Cookie File\n")
     monkeypatch.setenv("YTDL_COOKIES_FILE", str(cookies))
     assert cookie_ytdl_opts() == {"cookiefile": str(cookies)}
+
+
+# -- resolve_stream_url: 403 preflight + retry -------------------------------
+
+
+class FakeStreamStatusProbe:
+    """Scripted ``StreamStatusProbe``: returns statuses in order, records calls."""
+
+    def __init__(self, statuses: list[int]) -> None:
+        self._statuses = list(statuses)
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def __call__(self, url: str, headers: dict[str, str]) -> int:
+        self.calls.append((url, dict(headers)))
+        return self._statuses.pop(0)
+
+
+class CountingYoutubeDL:
+    """Returns a distinct stream URL per ``extract_info`` call."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract_info(self, query: str, *, download: bool = True) -> dict[str, Any]:
+        self.calls += 1
+        return {
+            "title": "t",
+            "url": f"stream://{self.calls}",
+            "http_headers": {"User-Agent": "UA"},
+        }
+
+
+def test_resolve_returns_first_url_when_preflight_accepts(loop) -> None:
+    ytdl = CountingYoutubeDL()
+    probe = FakeStreamStatusProbe([206])
+    src = TrackSource(ytdl, stream_status=probe)  # type: ignore[arg-type]
+
+    url = _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    assert url == "stream://1"
+    assert ytdl.calls == 1
+
+
+def test_resolve_re_extracts_until_a_url_is_accepted(loop) -> None:
+    """A 403'd URL stays 403; only a *fresh* extraction gets a new verdict."""
+    ytdl = CountingYoutubeDL()
+    probe = FakeStreamStatusProbe([403, 403, 206])
+    src = TrackSource(ytdl, stream_status=probe)  # type: ignore[arg-type]
+
+    url = _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    assert url == "stream://3"
+    assert [u for u, _ in probe.calls] == ["stream://1", "stream://2", "stream://3"]
+
+
+def test_resolve_passes_extractor_http_headers_to_probe(loop) -> None:
+    probe = FakeStreamStatusProbe([206])
+    src = TrackSource(CountingYoutubeDL(), stream_status=probe)  # type: ignore[arg-type]
+
+    _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    assert probe.calls[0][1] == {"User-Agent": "UA"}
+
+
+def test_resolve_raises_after_exhausting_attempts(loop) -> None:
+    ytdl = CountingYoutubeDL()
+    probe = FakeStreamStatusProbe([403, 403, 403, 403])
+    src = TrackSource(ytdl, stream_status=probe)  # type: ignore[arg-type]
+
+    with pytest.raises(StreamRejectedError, match=r"'q' was rejected .* 4 attempts"):
+        _await(loop, src.resolve_stream_url("q", loop=loop))
+    assert ytdl.calls == 4
+
+
+def test_resolve_does_not_retry_on_non_403_status(loop) -> None:
+    # 404/5xx are not the PO-token lottery; hand the URL to FFmpeg whose
+    # -reconnect flags deal with transient CDN errors.
+    ytdl = CountingYoutubeDL()
+    probe = FakeStreamStatusProbe([503])
+    src = TrackSource(ytdl, stream_status=probe)  # type: ignore[arg-type]
+
+    assert _await(loop, src.resolve_stream_url("q", loop=loop)) == "stream://1"
+    assert ytdl.calls == 1
+
+
+def test_resolve_raises_when_payload_has_no_url(loop) -> None:
+    fake = FakeYoutubeDL({"title": "no-url"})
+    src = TrackSource(fake, stream_status=FakeStreamStatusProbe([206]))  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="no streamable URL for 'q'"):
+        _await(loop, src.resolve_stream_url("q", loop=loop))
+
+
+def test_resolve_runs_probe_off_the_event_loop_thread(loop) -> None:
+    seen: list[threading.Thread] = []
+
+    def probe(url: str, headers: dict[str, str]) -> int:
+        seen.append(threading.current_thread())
+        return 206
+
+    src = TrackSource(CountingYoutubeDL(), stream_status=probe)  # type: ignore[arg-type]
+    _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    assert seen and seen[0] is not threading.current_thread()
+
+
+# --- pot_provider_ytdl_opts --------------------------------------------------
+
+
+def test_pot_provider_opts_empty_when_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv("YTDL_POT_PROVIDER_URL", raising=False)
+    assert pot_provider_ytdl_opts() == {}
+
+
+def test_pot_provider_opts_point_plugin_at_url() -> None:
+    assert pot_provider_ytdl_opts("http://bgutil:4416") == {
+        "extractor_args": {
+            "youtubepot-bgutilhttp": {"base_url": ["http://bgutil:4416"]}
+        }
+    }
+
+
+def test_pot_provider_opts_read_url_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("YTDL_POT_PROVIDER_URL", "http://env:4416")
+    assert pot_provider_ytdl_opts()["extractor_args"]["youtubepot-bgutilhttp"] == {
+        "base_url": ["http://env:4416"]
+    }

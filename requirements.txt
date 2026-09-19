@@ -1,4 +1,7 @@
 discord.py[voice]>=2.5.0
 yt-dlp[default]  # [default] pulls yt-dlp-ejs, the YouTube challenge solver
+# yt-dlp plugin that fetches GVS PO Tokens from the bgutil server; keep the
+# version equal to the image tag in docker-compose.yml.
+bgutil-ytdlp-pot-provider==2.0.0
 python-dotenv
 PyNaCl>=1.5.0
