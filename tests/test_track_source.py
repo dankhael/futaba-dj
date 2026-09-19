@@ -18,6 +18,7 @@ from services.track_source import (
     TrackInfo,
     TrackSource,
     cookie_ytdl_opts,
+    evict_cached_po_tokens,
     pot_provider_ytdl_opts,
 )
 
@@ -444,3 +445,36 @@ def test_pot_provider_opts_read_url_from_env(monkeypatch) -> None:
     assert pot_provider_ytdl_opts()["extractor_args"]["youtubepot-bgutilhttp"] == {
         "base_url": ["http://env:4416"]
     }
+
+
+# --- evict_cached_po_tokens ---------------------------------------------------
+
+
+def test_evict_clears_yt_dlp_global_po_token_cache() -> None:
+    from yt_dlp.extractor.youtube.pot._builtin.memory_cache import (
+        initialize_global_cache,
+    )
+
+    cache, lock, _max_size = initialize_global_cache(25)
+    with lock:
+        cache["web_embedded:gvs:vid"] = ("token", 2**40)
+
+    evict_cached_po_tokens()
+
+    assert cache == {}
+
+
+def test_resolve_evicts_po_tokens_between_rejected_attempts(loop, monkeypatch) -> None:
+    import services.track_source as track_source_module
+
+    evictions: list[int] = []
+    monkeypatch.setattr(
+        track_source_module, "evict_cached_po_tokens", lambda: evictions.append(1)
+    )
+    probe = FakeStreamStatusProbe([403, 403, 206])
+    src = TrackSource(CountingYoutubeDL(), stream_status=probe)  # type: ignore[arg-type]
+
+    _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    # One eviction per rejection, none after the accepted URL.
+    assert len(evictions) == 2

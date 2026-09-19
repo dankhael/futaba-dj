@@ -270,6 +270,7 @@ class TrackSource:
                 attempt,
                 _MAX_STREAM_ATTEMPTS,
             )
+            evict_cached_po_tokens()
         raise StreamRejectedError(query, _MAX_STREAM_ATTEMPTS)
 
     async def build_audio(
@@ -303,6 +304,37 @@ class TrackSource:
                 )
             data = entries[0]
         return data
+
+
+def evict_cached_po_tokens() -> None:
+    """Drop yt-dlp's in-memory PO Token cache so the next extraction gets a
+    fresh token.
+
+    yt-dlp caches PO Tokens per video in a process-global LRU
+    (``yt_dlp.extractor.youtube.pot._registry._pot_memory_cache``, seen in
+    2026.08.19). A retry that re-extracts but reuses the cached token
+    carries the CDN's previous verdict along — on the VPS four attempts
+    produced only two tokens and four 403s. Private API, so a missing
+    attribute in a future yt-dlp degrades to "no eviction" rather than a
+    crash.
+
+    Example::
+
+        evict_cached_po_tokens()
+        data = ytdl.extract_info(url, download=False)
+    """
+    try:
+        from yt_dlp.extractor.youtube.pot._registry import _pot_memory_cache
+
+        cache = _pot_memory_cache.value.get("cache")
+        lock = _pot_memory_cache.value.get("lock")
+    except (ImportError, AttributeError) as exc:
+        _LOG_EXTRACT.warning("po token cache eviction unavailable: %s", exc)
+        return
+    if cache is None or lock is None:
+        return
+    with lock:
+        cache.clear()
 
 
 def _stream_url_from(data: dict[str, Any], query: str) -> str:
