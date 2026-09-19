@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,9 +59,16 @@ class StreamRejectedError(RuntimeError):
 
 
 # Measured on the VPS: ~50% of web_embedded URLs are refused, independently
-# per extraction, so 4 draws leave ~6% of tracks unplayable without a PO
-# Token provider (see docker-compose.yml / README).
-_MAX_STREAM_ATTEMPTS = 4
+# per extraction (even with a PO Token), so 3 draws per extractor leave
+# ~12% for tracks that only web_embedded can serve.
+_MAX_STREAM_ATTEMPTS = 3
+
+# Stream extractors are tried in this order; ``None`` means yt-dlp's default
+# client selection. web_music served 20/20 URLs on the VPS (2026-09-19) but
+# only knows the YouTube Music catalogue — everything else comes back
+# "Video unavailable" and falls through to the default (web_embedded), which
+# knows every video but loses the 403 lottery about half the time.
+_STREAM_CLIENT_CASCADE: tuple[str | None, ...] = ("web_music", None)
 
 
 _YTDL_OPTS: dict[str, Any] = {
@@ -142,6 +150,24 @@ def pot_provider_ytdl_opts(url: str | None = None) -> dict[str, Any]:
     }
 
 
+def player_client_ytdl_opts(base: dict[str, Any], client: str | None) -> dict[str, Any]:
+    """Return ``base`` with ``youtube:player_client`` pinned to ``client``.
+
+    ``None`` returns ``base`` untouched (yt-dlp picks its default clients).
+    Deep-merges into any existing ``extractor_args`` so the PO Token
+    provider settings survive.
+
+    Example::
+
+        opts = player_client_ytdl_opts({**_YTDL_OPTS, **cookies}, "web_music")
+    """
+    if client is None:
+        return base
+    extractor_args = {**base.get("extractor_args", {})}
+    youtube_args = {**extractor_args.get("youtube", {}), "player_client": [client]}
+    return {**base, "extractor_args": {**extractor_args, "youtube": youtube_args}}
+
+
 # These reconnect flags exist because yt-dlp's resolved URLs frequently
 # drop mid-stream — keep them when editing the FFmpeg invocation.
 _FFMPEG_OPTS: dict[str, str] = {
@@ -170,19 +196,29 @@ class TrackSource:
         ytdl: yt_dlp.YoutubeDL,
         playlist_ytdl: yt_dlp.YoutubeDL | None = None,
         stream_status: StreamStatusProbe = urllib_stream_status,
+        stream_ytdls: Sequence[yt_dlp.YoutubeDL] | None = None,
     ) -> None:
         self._ytdl = ytdl
         # Fall back to the single-track extractor when no playlist
         # variant is supplied — keeps existing tests/callers working.
         self._playlist_ytdl = playlist_ytdl if playlist_ytdl is not None else ytdl
         self._stream_status = stream_status
+        # Ordered cascade used only for stream URLs; metadata (``probe``)
+        # stays on ``ytdl`` because a catalogue-restricted client would
+        # report ordinary videos as unavailable.
+        self._stream_ytdls = list(stream_ytdls) if stream_ytdls else [ytdl]
 
     @classmethod
     def with_defaults(cls) -> TrackSource:
         extra = {**cookie_ytdl_opts(), **pot_provider_ytdl_opts()}
+        track_opts = {**_YTDL_OPTS, **extra}
         return cls(
-            yt_dlp.YoutubeDL({**_YTDL_OPTS, **extra}),
+            yt_dlp.YoutubeDL(track_opts),
             yt_dlp.YoutubeDL({**_PLAYLIST_YTDL_OPTS, **extra}),
+            stream_ytdls=[
+                yt_dlp.YoutubeDL(player_client_ytdl_opts(track_opts, client))
+                for client in _STREAM_CLIENT_CASCADE
+            ],
         )
 
     async def probe(
@@ -247,15 +283,30 @@ class TrackSource:
     ) -> str:
         """Resolve a direct stream URL the CDN is confirmed to serve.
 
-        Each attempt re-extracts (a fresh URL gets a fresh verdict) and
-        pre-flights it; see ``services.stream_preflight`` for why.
+        Walks the extractor cascade; within each extractor every attempt
+        re-extracts (a fresh URL gets a fresh verdict) and pre-flights it
+        (see ``services.stream_preflight``). An extractor that cannot
+        resolve the video at all hands over to the next one immediately.
 
         Example::
 
             url = await source.resolve_stream_url("https://youtu.be/x", loop=loop)
         """
+        *fallbacks, last = self._stream_ytdls
+        for ytdl in fallbacks:
+            try:
+                return await self._resolve_with(ytdl, query, loop=loop)
+            except Exception as exc:
+                _LOG_EXTRACT.warning("extractor gave up query=%r error=%s", query, exc)
+        # The last extractor's error is the one worth showing: it is the
+        # general-purpose client, so its verdict applies to any video.
+        return await self._resolve_with(last, query, loop=loop)
+
+    async def _resolve_with(
+        self, ytdl: yt_dlp.YoutubeDL, query: str, *, loop: asyncio.AbstractEventLoop
+    ) -> str:
         for attempt in range(1, _MAX_STREAM_ATTEMPTS + 1):
-            data = await self._extract(query, loop=loop)
+            data = await self._extract(query, loop=loop, ytdl=ytdl)
             stream_url = _stream_url_from(data, query)
             headers: dict[str, str] = data.get("http_headers") or {}
             status = await loop.run_in_executor(
@@ -285,12 +336,17 @@ class TrackSource:
         return discord.PCMVolumeTransformer(ffmpeg_audio, volume=volume)
 
     async def _extract(
-        self, query: str, *, loop: asyncio.AbstractEventLoop
+        self,
+        query: str,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        ytdl: yt_dlp.YoutubeDL | None = None,
     ) -> dict[str, Any]:
+        extractor = ytdl if ytdl is not None else self._ytdl
         # extract_info is synchronous; run it on the default executor so
         # the asyncio loop keeps servicing Discord heartbeats.
         data = await loop.run_in_executor(
-            None, lambda: self._ytdl.extract_info(query, download=False)
+            None, lambda: extractor.extract_info(query, download=False)
         )
         if not isinstance(data, dict):
             raise RuntimeError(

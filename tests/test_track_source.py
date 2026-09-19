@@ -19,6 +19,7 @@ from services.track_source import (
     TrackSource,
     cookie_ytdl_opts,
     evict_cached_po_tokens,
+    player_client_ytdl_opts,
     pot_provider_ytdl_opts,
 )
 
@@ -382,12 +383,12 @@ def test_resolve_passes_extractor_http_headers_to_probe(loop) -> None:
 
 def test_resolve_raises_after_exhausting_attempts(loop) -> None:
     ytdl = CountingYoutubeDL()
-    probe = FakeStreamStatusProbe([403, 403, 403, 403])
+    probe = FakeStreamStatusProbe([403, 403, 403])
     src = TrackSource(ytdl, stream_status=probe)  # type: ignore[arg-type]
 
-    with pytest.raises(StreamRejectedError, match=r"'q' was rejected .* 4 attempts"):
+    with pytest.raises(StreamRejectedError, match=r"'q' was rejected .* 3 attempts"):
         _await(loop, src.resolve_stream_url("q", loop=loop))
-    assert ytdl.calls == 4
+    assert ytdl.calls == 3
 
 
 def test_resolve_does_not_retry_on_non_403_status(loop) -> None:
@@ -478,3 +479,112 @@ def test_resolve_evicts_po_tokens_between_rejected_attempts(loop, monkeypatch) -
 
     # One eviction per rejection, none after the accepted URL.
     assert len(evictions) == 2
+
+
+# -- resolve_stream_url: extractor cascade -----------------------------------
+
+
+class UnavailableYoutubeDL:
+    """Mimics a catalogue-restricted client (web_music) for an ordinary video."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract_info(self, query: str, *, download: bool = True) -> dict[str, Any]:
+        self.calls += 1
+        raise ValueError("Video unavailable. This video is not available")
+
+
+def test_cascade_uses_first_extractor_when_it_succeeds(loop) -> None:
+    first, second = CountingYoutubeDL(), CountingYoutubeDL()
+    src = TrackSource(
+        FakeYoutubeDL({}),  # type: ignore[arg-type]
+        stream_status=FakeStreamStatusProbe([206]),
+        stream_ytdls=[first, second],  # type: ignore[list-item]
+    )
+
+    _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    assert (first.calls, second.calls) == (1, 0)
+
+
+def test_cascade_falls_through_when_first_extractor_cannot_resolve(loop) -> None:
+    first, second = UnavailableYoutubeDL(), CountingYoutubeDL()
+    src = TrackSource(
+        FakeYoutubeDL({}),  # type: ignore[arg-type]
+        stream_status=FakeStreamStatusProbe([206]),
+        stream_ytdls=[first, second],  # type: ignore[list-item]
+    )
+
+    url = _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    assert url == "stream://1"
+    # One failed extraction is enough to move on — no 403-style retries.
+    assert (first.calls, second.calls) == (1, 1)
+
+
+def test_cascade_falls_through_after_first_extractor_exhausts_403s(loop) -> None:
+    first, second = CountingYoutubeDL(), CountingYoutubeDL()
+    src = TrackSource(
+        FakeYoutubeDL({}),  # type: ignore[arg-type]
+        stream_status=FakeStreamStatusProbe([403, 403, 403, 206]),
+        stream_ytdls=[first, second],  # type: ignore[list-item]
+    )
+
+    _await(loop, src.resolve_stream_url("q", loop=loop))
+
+    assert (first.calls, second.calls) == (3, 1)
+
+
+def test_cascade_surfaces_last_extractor_error(loop) -> None:
+    first, second = UnavailableYoutubeDL(), CountingYoutubeDL()
+    src = TrackSource(
+        FakeYoutubeDL({}),  # type: ignore[arg-type]
+        stream_status=FakeStreamStatusProbe([403, 403, 403]),
+        stream_ytdls=[first, second],  # type: ignore[list-item]
+    )
+
+    with pytest.raises(StreamRejectedError, match="HTTP 403 on all 3 attempts"):
+        _await(loop, src.resolve_stream_url("q", loop=loop))
+
+
+def test_probe_never_uses_the_stream_cascade(loop) -> None:
+    metadata = FakeYoutubeDL({"title": "meta", "url": "u"})
+    restricted = UnavailableYoutubeDL()
+    src = TrackSource(metadata, stream_ytdls=[restricted])  # type: ignore[arg-type]
+
+    info = _await(loop, src.probe("q", loop=loop))
+
+    assert info.title == "meta"
+    assert restricted.calls == 0
+
+
+# --- player_client_ytdl_opts -------------------------------------------------
+
+
+def test_player_client_opts_none_returns_base_unchanged() -> None:
+    base = {
+        "format": "bestaudio",
+        "extractor_args": {"youtube": {"fetch_pot": ["always"]}},
+    }
+    assert player_client_ytdl_opts(base, None) is base
+
+
+def test_player_client_opts_deep_merge_keeps_pot_settings() -> None:
+    base = {
+        "format": "bestaudio",
+        "extractor_args": {
+            "youtube": {"fetch_pot": ["always"]},
+            "youtubepot-bgutilhttp": {"base_url": ["http://bgutil:4416"]},
+        },
+    }
+
+    opts = player_client_ytdl_opts(base, "web_music")
+
+    assert opts["format"] == "bestaudio"
+    assert opts["extractor_args"] == {
+        "youtube": {"fetch_pot": ["always"], "player_client": ["web_music"]},
+        "youtubepot-bgutilhttp": {"base_url": ["http://bgutil:4416"]},
+    }
+    # Input must not be mutated: it is shared by every cascade entry.
+    assert "player_client" not in base["extractor_args"]["youtube"]

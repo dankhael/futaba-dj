@@ -80,9 +80,12 @@ Keep the image tag in `docker-compose.yml` and the plugin version in
 `requirements.txt` identical — mismatched versions fail silently.
 
 As a second line of defence the bot pre-flights every resolved URL with
-a 1-byte ranged GET and re-extracts on 403 (up to 4 times); tracks it
-still cannot stream are reported in the text channel instead of being
-skipped silently.
+a 1-byte ranged GET. Stream URLs are resolved through a client cascade:
+`web_music` first (served 100% of URLs in testing, but only knows the
+YouTube Music catalogue), then yt-dlp's default `web_embedded` (knows every
+video, but even with a PO Token roughly half its URLs are refused), each
+re-extracted up to 3 times on 403. Tracks that still cannot stream are
+reported in the text channel instead of being skipped silently.
 
 To check the provider is wired up:
 
