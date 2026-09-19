@@ -88,10 +88,12 @@ To check the provider is wired up:
 
 ```bash
 docker compose exec bot yt-dlp -v --cookies /app/cookies.txt \
+  --extractor-args "youtube:fetch_pot=always" \
   --extractor-args "youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416" \
   -g https://www.youtube.com/watch?v=dQw4w9WgXcQ 2>&1 | grep "\[pot"
-# expect: PO Token Providers: bgutil:http-2.0.0 (external) ... and no
-# "GVS PO Token which was not provided" warning
+# expect: "Retrieved a gvs PO Token for web_embedded client" — if only the
+# "PO Token Providers: bgutil:http-2.0.0" line shows up, no token is being
+# fetched (that is what fetch_pot=always fixes)
 ```
 
 ## Development

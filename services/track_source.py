@@ -131,7 +131,15 @@ def pot_provider_ytdl_opts(url: str | None = None) -> dict[str, Any]:
     if not resolved:
         return {}
     # yt-dlp's Python API takes extractor-arg values as lists of strings.
-    return {"extractor_args": {"youtubepot-bgutilhttp": {"base_url": [resolved]}}}
+    # fetch_pot=always is essential: web_embedded has no GVS PO Token policy
+    # in yt-dlp, so the default "auto" never asks the provider for one and
+    # the 403s continue even with the sidecar running (verified on the VPS).
+    return {
+        "extractor_args": {
+            "youtube": {"fetch_pot": ["always"]},
+            "youtubepot-bgutilhttp": {"base_url": [resolved]},
+        }
+    }
 
 
 # These reconnect flags exist because yt-dlp's resolved URLs frequently

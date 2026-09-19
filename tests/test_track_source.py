@@ -429,10 +429,12 @@ def test_pot_provider_opts_empty_when_unconfigured(monkeypatch) -> None:
     assert pot_provider_ytdl_opts() == {}
 
 
-def test_pot_provider_opts_point_plugin_at_url() -> None:
+def test_pot_provider_opts_point_plugin_at_url_and_force_fetch() -> None:
+    # Without fetch_pot=always yt-dlp never requests a token for web_embedded.
     assert pot_provider_ytdl_opts("http://bgutil:4416") == {
         "extractor_args": {
-            "youtubepot-bgutilhttp": {"base_url": ["http://bgutil:4416"]}
+            "youtube": {"fetch_pot": ["always"]},
+            "youtubepot-bgutilhttp": {"base_url": ["http://bgutil:4416"]},
         }
     }
 
